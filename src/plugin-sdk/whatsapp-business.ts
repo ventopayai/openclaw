@@ -14,3 +14,4 @@ export type { OpenClawConfig } from "../config/config.js";
 export type { PluginRuntime } from "../plugins/runtime/types.js";
 export { DEFAULT_ACCOUNT_ID } from "../routing/session-key.js";
 export { waitUntilAbort } from "./channel-lifecycle.js";
+export { saveMediaBuffer } from "../media/store.js";

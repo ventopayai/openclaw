@@ -11,10 +11,11 @@ import {
   registerPluginHttpRoute,
   buildChannelConfigSchema,
   waitUntilAbort,
+  saveMediaBuffer,
 } from "openclaw/plugin-sdk/whatsapp-business";
 import { z } from "zod";
 import { listAccountIds, resolveAccount } from "./accounts.js";
-import { sendWhatsAppMessage } from "./client.js";
+import { sendWhatsAppMessage, sendWhatsAppMediaMessage } from "./client.js";
 import { getWhatsappBusinessRuntime } from "./runtime.js";
 import type { ResolvedWhatsAppBusinessAccount } from "./types.js";
 import { createWhatsAppBusinessWebhookHandler } from "./webhook-handler.js";
@@ -177,6 +178,28 @@ export function createWhatsAppBusinessPlugin() {
               peer: { kind: "direct" as const, id: msg.from },
             });
 
+            // Save media to disk if present
+            let mediaPath: string | undefined;
+            let mediaType: string | undefined;
+
+            if (msg.mediaBuffer) {
+              try {
+                const saved = await saveMediaBuffer(
+                  msg.mediaBuffer,
+                  msg.mediaMimeType,
+                  "inbound",
+                  25 * 1024 * 1024,
+                  msg.mediaFileName,
+                );
+                mediaPath = saved.path;
+                mediaType = msg.mediaMimeType || "application/octet-stream";
+                log?.info?.(`Saved inbound media to ${mediaPath} (${msg.mediaMimeType})`);
+              } catch (err) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                log?.error?.(`Failed to save inbound media for ${msg.from}: ${errMsg}`);
+              }
+            }
+
             const msgCtx = rt.channel.reply.finalizeInboundContext({
               Body: msg.body,
               RawBody: msg.body,
@@ -195,14 +218,42 @@ export function createWhatsAppBusinessPlugin() {
               ConversationLabel: msg.from,
               Timestamp: Date.now(),
               CommandAuthorized: msg.commandAuthorized,
+              ...(mediaPath ? {
+                MediaPath: mediaPath,
+                MediaPaths: [mediaPath],
+                MediaType: mediaType,
+                MediaTypes: [mediaType || "application/octet-stream"],
+              } : {}),
             });
 
             await rt.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
               ctx: msgCtx,
               cfg: currentCfg,
               dispatcherOptions: {
-                deliver: async (payload: { text?: string; body?: string }) => {
+                deliver: async (payload: { text?: string; body?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
                   const text = payload?.text ?? payload?.body;
+                  const mediaUrls = payload?.mediaUrls?.length
+                    ? payload.mediaUrls
+                    : payload?.mediaUrl
+                      ? [payload.mediaUrl]
+                      : [];
+
+                  if (mediaUrls.length > 0) {
+                    for (let i = 0; i < mediaUrls.length; i++) {
+                      const caption = i === 0 ? text : undefined;
+                      log?.info?.(`Sending WhatsApp Business media to ${msg.from}: ${mediaUrls[i]?.slice(0, 100)}`);
+                      try {
+                        await sendWhatsAppMediaMessage({ text: caption, mediaUrl: mediaUrls[i] as string });
+                        log?.info?.(`WhatsApp Business media sent successfully to ${msg.from}`);
+                      } catch (err) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        log?.error?.(`WhatsApp Business media send failed for ${msg.from}: ${errMsg}`);
+                        throw err;
+                      }
+                    }
+                    return;
+                  }
+
                   if (!text) {
                     log?.warn?.(`WhatsApp Business deliver called with empty text for ${msg.from}, payload keys: ${Object.keys(payload ?? {}).join(", ")}`);
                     return;
