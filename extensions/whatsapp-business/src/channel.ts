@@ -220,6 +220,7 @@ export function createWhatsAppBusinessPlugin() {
                 },
                 typingCallbacks: createTypingCallbacks({
                   start: async () => {
+                    log?.info?.(`Typing indicator for ${msg.from}`);
                     await sendWhatsAppTyping("typing_on", msg.wamid);
                   },
                   stop: async () => {
@@ -231,9 +232,6 @@ export function createWhatsAppBusinessPlugin() {
                   },
                   keepaliveIntervalMs: 5_000,
                 }),
-                onReplyStart: () => {
-                  log?.info?.(`Agent reply started for ${msg.from}`);
-                },
               },
             });
 
