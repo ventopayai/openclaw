@@ -11,10 +11,11 @@ import {
   registerPluginHttpRoute,
   buildChannelConfigSchema,
   waitUntilAbort,
+  createTypingCallbacks,
 } from "openclaw/plugin-sdk/whatsapp-business";
 import { z } from "zod";
 import { listAccountIds, resolveAccount } from "./accounts.js";
-import { sendWhatsAppMessage } from "./client.js";
+import { sendWhatsAppMessage, sendWhatsAppTyping } from "./client.js";
 import { getWhatsappBusinessRuntime } from "./runtime.js";
 import type { ResolvedWhatsAppBusinessAccount } from "./types.js";
 import { createWhatsAppBusinessWebhookHandler } from "./webhook-handler.js";
@@ -217,6 +218,19 @@ export function createWhatsAppBusinessPlugin() {
                     throw err;
                   }
                 },
+                typingCallbacks: createTypingCallbacks({
+                  start: async () => {
+                    await sendWhatsAppTyping("typing_on");
+                  },
+                  stop: async () => {
+                    await sendWhatsAppTyping("typing_off");
+                  },
+                  onStartError: (err) => {
+                    const errMsg = err instanceof Error ? err.message : String(err);
+                    log?.warn?.(`Typing indicator failed for ${msg.from}: ${errMsg}`);
+                  },
+                  keepaliveIntervalMs: 5_000,
+                }),
                 onReplyStart: () => {
                   log?.info?.(`Agent reply started for ${msg.from}`);
                 },

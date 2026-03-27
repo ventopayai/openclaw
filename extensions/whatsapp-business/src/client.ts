@@ -18,12 +18,10 @@ function getGatewayToken(): string {
   return token;
 }
 
-export async function sendWhatsAppMessage(content: string): Promise<Record<string, unknown>> {
+async function postToHub(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   const hubUrl = getHubUrl();
   const token = getGatewayToken();
   const url = `${hubUrl}/api/whatsapp-business/send`;
-
-  console.log(`[whatsapp-business] POST ${url} (${content.length} chars)`);
 
   const res = await fetch(url, {
     method: "POST",
@@ -31,7 +29,7 @@ export async function sendWhatsAppMessage(content: string): Promise<Record<strin
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ text: content }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
@@ -41,6 +39,16 @@ export async function sendWhatsAppMessage(content: string): Promise<Record<strin
   }
 
   const data = (await res.json()) as Record<string, unknown>;
-  console.log(`[whatsapp-business] Message sent successfully via hub`);
   return data;
+}
+
+export async function sendWhatsAppMessage(content: string): Promise<Record<string, unknown>> {
+  console.log(`[whatsapp-business] Sending text (${content.length} chars)`);
+  const data = await postToHub({ text: content });
+  console.log(`[whatsapp-business] Text message sent successfully via hub`);
+  return data;
+}
+
+export async function sendWhatsAppTyping(action: "typing_on" | "typing_off"): Promise<void> {
+  await postToHub({ action });
 }
