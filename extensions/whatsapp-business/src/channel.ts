@@ -18,6 +18,7 @@ import { listAccountIds, resolveAccount } from "./accounts.js";
 import { sendWhatsAppMessage, sendWhatsAppMediaMessage } from "./client.js";
 import { getWhatsappBusinessRuntime } from "./runtime.js";
 import type { ResolvedWhatsAppBusinessAccount } from "./types.js";
+import { extractVideoFrames } from "./video-frames.js";
 import { createWhatsAppBusinessWebhookHandler } from "./webhook-handler.js";
 
 const CHANNEL_ID = "whatsapp-business";
@@ -179,8 +180,9 @@ export function createWhatsAppBusinessPlugin() {
             });
 
             // Save media to disk if present
-            let mediaPath: string | undefined;
-            let mediaType: string | undefined;
+            let mediaPaths: string[] = [];
+            let mediaTypes: string[] = [];
+            let frameCleanup: (() => Promise<void>) | undefined;
 
             if (msg.mediaBuffer) {
               try {
@@ -191,9 +193,27 @@ export function createWhatsAppBusinessPlugin() {
                   25 * 1024 * 1024,
                   msg.mediaFileName,
                 );
-                mediaPath = saved.path;
-                mediaType = msg.mediaMimeType || "application/octet-stream";
-                log?.info?.(`Saved inbound media to ${mediaPath} (${msg.mediaMimeType})`);
+                const mediaType = msg.mediaMimeType || "application/octet-stream";
+                mediaPaths.push(saved.path);
+                mediaTypes.push(mediaType);
+                log?.info?.(`Saved inbound media to ${saved.path} (${msg.mediaMimeType})`);
+
+                // For videos, extract frames so the agent can "see" the content
+                const isVideo = mediaType.startsWith("video/");
+                if (isVideo) {
+                  const frames = await extractVideoFrames(saved.path, log ? {
+                    info: (...args: unknown[]) => log.info?.(...args),
+                    warn: (...args: unknown[]) => log.warn?.(...args),
+                  } : undefined);
+                  if (frames) {
+                    for (const fp of frames.framePaths) {
+                      mediaPaths.push(fp);
+                      mediaTypes.push("image/jpeg");
+                    }
+                    frameCleanup = frames.cleanup;
+                    log?.info?.(`Video ${frames.durationSecs.toFixed(1)}s → ${frames.framePaths.length} frames extracted`);
+                  }
+                }
               } catch (err) {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 log?.error?.(`Failed to save inbound media for ${msg.from}: ${errMsg}`);
@@ -218,61 +238,68 @@ export function createWhatsAppBusinessPlugin() {
               ConversationLabel: msg.from,
               Timestamp: Date.now(),
               CommandAuthorized: msg.commandAuthorized,
-              ...(mediaPath ? {
-                MediaPath: mediaPath,
-                MediaPaths: [mediaPath],
-                MediaType: mediaType,
-                MediaTypes: [mediaType || "application/octet-stream"],
+              ...(mediaPaths.length > 0 ? {
+                MediaPath: mediaPaths[0],
+                MediaPaths: mediaPaths,
+                MediaType: mediaTypes[0],
+                MediaTypes: mediaTypes,
               } : {}),
             });
 
-            await rt.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-              ctx: msgCtx,
-              cfg: currentCfg,
-              dispatcherOptions: {
-                deliver: async (payload: { text?: string; body?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
-                  const text = payload?.text ?? payload?.body;
-                  const mediaUrls = payload?.mediaUrls?.length
-                    ? payload.mediaUrls
-                    : payload?.mediaUrl
-                      ? [payload.mediaUrl]
-                      : [];
+            try {
+              await rt.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+                ctx: msgCtx,
+                cfg: currentCfg,
+                dispatcherOptions: {
+                  deliver: async (payload: { text?: string; body?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
+                    const text = payload?.text ?? payload?.body;
+                    const mediaUrls = payload?.mediaUrls?.length
+                      ? payload.mediaUrls
+                      : payload?.mediaUrl
+                        ? [payload.mediaUrl]
+                        : [];
 
-                  if (mediaUrls.length > 0) {
-                    for (let i = 0; i < mediaUrls.length; i++) {
-                      const caption = i === 0 ? text : undefined;
-                      log?.info?.(`Sending WhatsApp Business media to ${msg.from}: ${mediaUrls[i]?.slice(0, 100)}`);
-                      try {
-                        await sendWhatsAppMediaMessage({ text: caption, mediaUrl: mediaUrls[i] as string });
-                        log?.info?.(`WhatsApp Business media sent successfully to ${msg.from}`);
-                      } catch (err) {
-                        const errMsg = err instanceof Error ? err.message : String(err);
-                        log?.error?.(`WhatsApp Business media send failed for ${msg.from}: ${errMsg}`);
-                        throw err;
+                    if (mediaUrls.length > 0) {
+                      for (let i = 0; i < mediaUrls.length; i++) {
+                        const caption = i === 0 ? text : undefined;
+                        log?.info?.(`Sending WhatsApp Business media to ${msg.from}: ${mediaUrls[i]?.slice(0, 100)}`);
+                        try {
+                          await sendWhatsAppMediaMessage({ text: caption, mediaUrl: mediaUrls[i] as string });
+                          log?.info?.(`WhatsApp Business media sent successfully to ${msg.from}`);
+                        } catch (err) {
+                          const errMsg = err instanceof Error ? err.message : String(err);
+                          log?.error?.(`WhatsApp Business media send failed for ${msg.from}: ${errMsg}`);
+                          throw err;
+                        }
                       }
+                      return;
                     }
-                    return;
-                  }
 
-                  if (!text) {
-                    log?.warn?.(`WhatsApp Business deliver called with empty text for ${msg.from}, payload keys: ${Object.keys(payload ?? {}).join(", ")}`);
-                    return;
-                  }
-                  log?.info?.(`Sending WhatsApp Business to ${msg.from}: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
-                  try {
-                    await sendWhatsAppMessage(text);
-                    log?.info?.(`WhatsApp Business message sent successfully to ${msg.from}`);
-                  } catch (err) {
-                    const errMsg = err instanceof Error ? err.message : String(err);
-                    log?.error?.(`WhatsApp Business send failed for ${msg.from}: ${errMsg}`);
-                    throw err;
-                  }
+                    if (!text) {
+                      log?.warn?.(`WhatsApp Business deliver called with empty text for ${msg.from}, payload keys: ${Object.keys(payload ?? {}).join(", ")}`);
+                      return;
+                    }
+                    log?.info?.(`Sending WhatsApp Business to ${msg.from}: ${text.slice(0, 100)}${text.length > 100 ? "..." : ""}`);
+                    try {
+                      await sendWhatsAppMessage(text);
+                      log?.info?.(`WhatsApp Business message sent successfully to ${msg.from}`);
+                    } catch (err) {
+                      const errMsg = err instanceof Error ? err.message : String(err);
+                      log?.error?.(`WhatsApp Business send failed for ${msg.from}: ${errMsg}`);
+                      throw err;
+                    }
+                  },
+                  onReplyStart: () => {
+                    log?.info?.(`Agent reply started for ${msg.from}`);
+                  },
                 },
-                onReplyStart: () => {
-                  log?.info?.(`Agent reply started for ${msg.from}`);
-                },
-              },
-            });
+              });
+            } finally {
+              // Clean up temporary video frame files
+              if (frameCleanup) {
+                await frameCleanup();
+              }
+            }
 
             return null;
           },
