@@ -140,7 +140,7 @@ export function createWhatsAppBusinessPlugin() {
 
     outbound: {
       deliveryMode: "gateway" as const,
-      textChunkLimit: 4096,
+      textChunkLimit: 1000,
 
       sendText: async ({ text }: any) => {
         console.log(`[whatsapp-business] outbound.sendText called: ${String(text).slice(0, 100)}`);
