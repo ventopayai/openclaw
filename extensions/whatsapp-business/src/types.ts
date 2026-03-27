@@ -29,3 +29,22 @@ export interface ResolvedWhatsAppBusinessAccount {
   dmPolicy: "open" | "allowlist" | "disabled";
   allowedPhones: string[];
 }
+
+// ── Media types for hub ↔ instance enriched payload ─────────
+
+export type WabMediaType = "image" | "audio" | "video" | "document" | "sticker";
+
+export type WabEnrichedMessage = {
+  from: string;
+  text: string;
+  messageType: "text" | WabMediaType;
+  wamid?: string;
+  mediaBase64?: string;
+  mediaMimeType?: string;
+  mediaFileName?: string;
+};
+
+export type WabEnrichedPayload = {
+  type: "whatsapp-business-enriched";
+  messages: WabEnrichedMessage[];
+};

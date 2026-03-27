@@ -1,6 +1,6 @@
 /**
  * Inbound webhook handler for WhatsApp Business messages forwarded from the hub.
- * Receives the raw Meta WhatsApp Business webhook payload.
+ * Receives either the enriched payload (with media) or the raw Meta webhook payload (backward compat).
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -9,9 +9,11 @@ import {
   readRequestBodyWithLimit,
   requestBodyErrorToText,
 } from "openclaw/plugin-sdk/whatsapp-business";
+import type { WabEnrichedPayload, WabEnrichedMessage } from "./types.js";
 
-const PREAUTH_MAX_BODY_BYTES = 64 * 1024;
-const PREAUTH_BODY_TIMEOUT_MS = 5_000;
+// 25 MB to accommodate base64-encoded media
+const PREAUTH_MAX_BODY_BYTES = 25 * 1024 * 1024;
+const PREAUTH_BODY_TIMEOUT_MS = 30_000;
 
 /** Read the full request body as a string. */
 async function readBody(req: IncomingMessage): Promise<
@@ -49,6 +51,10 @@ export interface WhatsAppBusinessWebhookHandlerDeps {
     chatType: string;
     accountId: string;
     commandAuthorized: boolean;
+    wamid?: string;
+    mediaBuffer?: Buffer;
+    mediaMimeType?: string;
+    mediaFileName?: string;
   }) => Promise<string | null>;
   log?: {
     info: (...args: unknown[]) => void;
@@ -58,12 +64,54 @@ export interface WhatsAppBusinessWebhookHandlerDeps {
 }
 
 /**
+ * Try to parse as enriched payload from hub. Returns messages if valid, null otherwise.
+ */
+function parseEnrichedPayload(payload: Record<string, unknown>): WabEnrichedMessage[] | null {
+  if (payload.type !== "whatsapp-business-enriched") return null;
+  const messages = payload.messages;
+  if (!Array.isArray(messages)) return null;
+  return messages as WabEnrichedMessage[];
+}
+
+/**
+ * Extract messages from Meta's raw webhook payload (backward compatibility).
+ */
+function extractFromRawMeta(payload: Record<string, unknown>): Array<{ from: string; text: string }> {
+  const results: Array<{ from: string; text: string }> = [];
+  const entries = payload.entry as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(entries)) return results;
+
+  for (const entry of entries) {
+    const changes = entry.changes as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(changes)) continue;
+
+    for (const change of changes) {
+      const value = change.value as Record<string, unknown> | undefined;
+      if (!value) continue;
+
+      const msgs = value.messages as Array<Record<string, unknown>> | undefined;
+      if (!Array.isArray(msgs)) continue;
+
+      for (const msg of msgs) {
+        const from = msg.from as string | undefined;
+        const textObj = msg.text as { body?: string } | undefined;
+        const text = textObj?.body;
+        if (from && text) {
+          results.push({ from, text });
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
  * Create an HTTP request handler for WhatsApp Business webhooks forwarded from the hub.
  *
- * 1. Parse JSON body (Meta webhook payload)
- * 2. Extract messages from entry[].changes[].value.messages[]
- * 3. Deliver each message to agent
- * 4. ACK with 200
+ * Supports two payload formats:
+ * 1. Enriched payload (from hub with media): { type: "whatsapp-business-enriched", messages: [...] }
+ * 2. Raw Meta webhook payload (backward compatibility): entry[].changes[].value.messages[]
  */
 export function createWhatsAppBusinessWebhookHandler(deps: WhatsAppBusinessWebhookHandlerDeps) {
   const { deliver, log } = deps;
@@ -89,51 +137,68 @@ export function createWhatsAppBusinessWebhookHandler(deps: WhatsAppBusinessWebho
       return;
     }
 
-    // Extract messages from Meta's nested payload structure
-    const entries = payload.entry as Array<Record<string, unknown>> | undefined;
-    if (!Array.isArray(entries)) {
-      respondJson(res, 200, { ok: true });
-      return;
-    }
-
     // ACK immediately
     respondJson(res, 200, { ok: true });
 
-    // Process messages asynchronously
-    for (const entry of entries) {
-      const changes = entry.changes as Array<Record<string, unknown>> | undefined;
-      if (!Array.isArray(changes)) continue;
+    // Try enriched payload first, fall back to raw Meta format
+    const enrichedMessages = parseEnrichedPayload(payload);
 
-      for (const change of changes) {
-        const value = change.value as Record<string, unknown> | undefined;
-        if (!value) continue;
+    if (enrichedMessages) {
+      // Process enriched messages (with potential media)
+      for (const msg of enrichedMessages) {
+        if (!msg.from || !msg.text) continue;
 
-        const msgs = value.messages as Array<Record<string, unknown>> | undefined;
-        if (!Array.isArray(msgs)) continue;
+        const preview = msg.text.length > 100 ? `${msg.text.slice(0, 100)}...` : msg.text;
+        log?.info(`WhatsApp Business ${msg.messageType} from ${msg.from}: ${preview}`);
 
-        for (const msg of msgs) {
-          const from = msg.from as string | undefined;
-          const textObj = msg.text as { body?: string } | undefined;
-          const text = textObj?.body;
-
-          if (!from || !text) continue;
-
-          const preview = text.length > 100 ? `${text.slice(0, 100)}...` : text;
-          log?.info(`WhatsApp Business from ${from}: ${preview}`);
-
+        let mediaBuffer: Buffer | undefined;
+        if (msg.mediaBase64) {
           try {
-            await deliver({
-              body: text,
-              from,
-              provider: "whatsapp-business",
-              chatType: "direct",
-              accountId: "default",
-              commandAuthorized: true,
-            });
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            log?.error(`Failed to process WhatsApp Business message from ${from}: ${errMsg}`);
+            mediaBuffer = Buffer.from(msg.mediaBase64, "base64");
+          } catch {
+            log?.error(`Failed to decode base64 media for message from ${msg.from}`);
           }
+        }
+
+        try {
+          await deliver({
+            body: msg.text,
+            from: msg.from,
+            provider: "whatsapp-business",
+            chatType: "direct",
+            accountId: "default",
+            commandAuthorized: true,
+            ...(msg.wamid ? { wamid: msg.wamid } : {}),
+            ...(mediaBuffer ? {
+              mediaBuffer,
+              mediaMimeType: msg.mediaMimeType,
+              mediaFileName: msg.mediaFileName,
+            } : {}),
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log?.error(`Failed to process WhatsApp Business message from ${msg.from}: ${errMsg}`);
+        }
+      }
+    } else {
+      // Backward compatibility: raw Meta webhook payload
+      const rawMessages = extractFromRawMeta(payload);
+      for (const msg of rawMessages) {
+        const preview = msg.text.length > 100 ? `${msg.text.slice(0, 100)}...` : msg.text;
+        log?.info(`WhatsApp Business from ${msg.from}: ${preview}`);
+
+        try {
+          await deliver({
+            body: msg.text,
+            from: msg.from,
+            provider: "whatsapp-business",
+            chatType: "direct",
+            accountId: "default",
+            commandAuthorized: true,
+          });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log?.error(`Failed to process WhatsApp Business message from ${msg.from}: ${errMsg}`);
         }
       }
     }

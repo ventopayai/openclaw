@@ -220,10 +220,10 @@ export function createWhatsAppBusinessPlugin() {
                 },
                 typingCallbacks: createTypingCallbacks({
                   start: async () => {
-                    await sendWhatsAppTyping("typing_on");
+                    await sendWhatsAppTyping("typing_on", msg.wamid);
                   },
                   stop: async () => {
-                    await sendWhatsAppTyping("typing_off");
+                    await sendWhatsAppTyping("typing_off", msg.wamid);
                   },
                   onStartError: (err) => {
                     const errMsg = err instanceof Error ? err.message : String(err);

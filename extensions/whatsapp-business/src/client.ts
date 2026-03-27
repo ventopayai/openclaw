@@ -49,6 +49,7 @@ export async function sendWhatsAppMessage(content: string): Promise<Record<strin
   return data;
 }
 
-export async function sendWhatsAppTyping(action: "typing_on" | "typing_off"): Promise<void> {
-  await postToHub({ action });
+export async function sendWhatsAppTyping(action: "typing_on" | "typing_off", messageId?: string): Promise<void> {
+  if (!messageId) return; // typing requires a message_id reference
+  await postToHub({ action, messageId });
 }
