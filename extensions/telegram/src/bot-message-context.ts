@@ -233,7 +233,11 @@ export const buildTelegramMessageContext = async ({
   // DMs: use thread suffix for session isolation (works regardless of dmScope)
   const threadKeys =
     dmThreadId != null
-      ? resolveThreadSessionKeys({ baseSessionKey, threadId: `${chatId}:${dmThreadId}` })
+      ? resolveThreadSessionKeys({
+          baseSessionKey,
+          threadId: `${chatId}:${dmThreadId}`,
+          sessionScope: freshCfg.session?.scope,
+        })
       : null;
   const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
   route = {
@@ -242,6 +246,7 @@ export const buildTelegramMessageContext = async ({
     lastRoutePolicy: deriveLastRoutePolicy({
       sessionKey,
       mainSessionKey: route.mainSessionKey,
+      sessionScope: freshCfg.session?.scope,
     }),
   };
   // Compute requireMention after access checks and final route selection.

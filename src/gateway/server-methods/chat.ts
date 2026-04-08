@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveSessionAgentId, resolveSessionAgentIds } from "../../agents/agent-scope.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
@@ -12,6 +12,7 @@ import type { ReplyPayload } from "../../auto-reply/types.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveSessionFilePath } from "../../config/sessions.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
+import { buildAgentMainSessionKey } from "../../routing/session-key.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
@@ -970,11 +971,29 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const { sessionKey, limit } = params as {
+    const { sessionKey: rawHistoryKey, limit } = params as {
       sessionKey: string;
       limit?: number;
     };
-    const { cfg, storePath, entry } = loadSessionEntry(sessionKey);
+    // When session scope is global, resolve from the shared global session key
+    const effectiveHistoryKey = (() => {
+      const probe = loadSessionEntry(rawHistoryKey);
+      if (probe.cfg.session?.scope === "global") {
+        const globalKey = buildAgentMainSessionKey({
+          agentId: resolveSessionAgentIds({ sessionKey: probe.canonicalKey, config: probe.cfg })
+            .sessionAgentId,
+          mainKey: "global",
+        }).toLowerCase();
+        return globalKey;
+      }
+      return rawHistoryKey;
+    })();
+    const {
+      cfg,
+      storePath,
+      entry,
+      canonicalKey: sessionKey,
+    } = loadSessionEntry(effectiveHistoryKey);
     const sessionId = entry?.sessionId;
     const rawMessages =
       sessionId && storePath ? readSessionMessages(sessionId, storePath, entry?.sessionFile) : [];
@@ -1186,7 +1205,19 @@ export const chatHandlers: GatewayRequestHandlers = {
       }
     }
     const rawSessionKey = p.sessionKey;
-    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
+    // When session scope is global, redirect all clients to the shared global session key
+    const effectiveSendKey = (() => {
+      const probe = loadSessionEntry(rawSessionKey);
+      if (probe.cfg.session?.scope === "global") {
+        return buildAgentMainSessionKey({
+          agentId: resolveSessionAgentIds({ sessionKey: probe.canonicalKey, config: probe.cfg })
+            .sessionAgentId,
+          mainKey: "global",
+        }).toLowerCase();
+      }
+      return rawSessionKey;
+    })();
+    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(effectiveSendKey);
     const timeoutMs = resolveAgentTimeoutMs({
       cfg,
       overrideMs: p.timeoutMs,

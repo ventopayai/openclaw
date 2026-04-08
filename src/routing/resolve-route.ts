@@ -63,7 +63,11 @@ export { DEFAULT_ACCOUNT_ID, DEFAULT_AGENT_ID } from "./session-key.js";
 export function deriveLastRoutePolicy(params: {
   sessionKey: string;
   mainSessionKey: string;
+  sessionScope?: "per-sender" | "global";
 }): ResolvedAgentRoute["lastRoutePolicy"] {
+  if (params.sessionScope === "global") {
+    return "main";
+  }
   return params.sessionKey === params.mainSessionKey ? "main" : "session";
 }
 
@@ -667,7 +671,7 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     }).toLowerCase();
     const sessionKey =
       sessionScope === "global"
-        ? "global"
+        ? buildAgentMainSessionKey({ agentId: resolvedAgentId, mainKey: "global" }).toLowerCase()
         : buildAgentSessionKey({
             agentId: resolvedAgentId,
             channel,
@@ -682,7 +686,7 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
       accountId,
       sessionKey,
       mainSessionKey,
-      lastRoutePolicy: deriveLastRoutePolicy({ sessionKey, mainSessionKey }),
+      lastRoutePolicy: deriveLastRoutePolicy({ sessionKey, mainSessionKey, sessionScope }),
       matchedBy,
     };
     if (routeCache && routeCacheKey) {

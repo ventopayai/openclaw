@@ -310,6 +310,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     threadId: threadChannel ? messageChannelId : undefined,
     parentSessionKey,
     useSuffix: false,
+    sessionScope: cfg.session?.scope,
   });
   const replyPlan = await resolveDiscordAutoThreadReplyPlan({
     client,
