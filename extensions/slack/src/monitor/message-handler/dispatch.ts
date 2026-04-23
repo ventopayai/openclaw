@@ -36,6 +36,25 @@ function hasMedia(payload: ReplyPayload): boolean {
   return Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
 }
 
+/**
+ * Slack delivery mode.
+ * - "streaming" (default): current behavior — plain response text is delivered
+ *   progressively (preview edits, block streaming) or as normal message posts.
+ * - "tool-only": user-facing text MUST be emitted via the `message` tool
+ *   (outbound.sendText path). Raw response text blocks produced by the LLM
+ *   are logged for observability and DISCARDED. Media and channel-specific
+ *   interactive blocks still flow through. Mirrors the architectural pattern
+ *   used by production MCP WhatsApp plugins for agents prone to narrating.
+ *   Opt in per-instance when the loaded agent is narration-prone (e.g.
+ *   onboarding / support flows) and strict user-facing delivery is required.
+ */
+type SlackDeliveryMode = "streaming" | "tool-only";
+
+function resolveSlackDeliveryMode(raw: unknown): SlackDeliveryMode {
+  if (typeof raw !== "string") return "streaming";
+  return raw.trim().toLowerCase() === "tool-only" ? "tool-only" : "streaming";
+}
+
 export function isSlackStreamingEnabled(params: {
   mode: "off" | "partial" | "block" | "progress";
   nativeStreaming: boolean;
@@ -210,6 +229,16 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     streamMode: account.config.streamMode,
     nativeStreaming: account.config.nativeStreaming,
   });
+  const deliveryMode = resolveSlackDeliveryMode(
+    (account.config as { deliveryMode?: unknown }).deliveryMode,
+  );
+  const toolOnlyDelivery = deliveryMode === "tool-only";
+  if (toolOnlyDelivery) {
+    logVerbose(
+      `slack: deliveryMode=tool-only — plain response text will be discarded at deliver(); ` +
+        `user-facing text must go through the message tool (outbound.sendText).`,
+    );
+  }
   const previewStreamingEnabled = slackStreaming.mode !== "off";
   const streamingEnabled = isSlackStreamingEnabled({
     mode: slackStreaming.mode,
@@ -306,6 +335,28 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
     humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
     typingCallbacks,
     deliver: async (payload) => {
+      if (toolOnlyDelivery) {
+        // Tool-only delivery: user-facing text flows through outbound.sendText
+        // (invoked by `message(action="send")`) on the dedicated send path.
+        // Raw response-text blocks reaching deliver() here are narration
+        // (chain-of-thought leaking through the response channel) and are
+        // discarded. Media and channel-specific interactive blocks keep
+        // flowing — they cannot be hallucinated as free text.
+        const hasSlackBlocks = (readSlackReplyBlocks(payload)?.length ?? 0) > 0;
+        if (hasMedia(payload) || hasSlackBlocks) {
+          await deliverNormally(payload);
+          return;
+        }
+        const textLen = payload.text?.length ?? 0;
+        if (textLen > 0) {
+          logVerbose(
+            `slack: DISCARD text block (${textLen} chars) — deliveryMode=tool-only; ` +
+              `preview: "${(payload.text ?? "").slice(0, 100)}${textLen > 100 ? "..." : ""}"`,
+          );
+        }
+        return;
+      }
+
       if (useStreaming) {
         await deliverWithStreaming(payload);
         return;
