@@ -191,15 +191,26 @@ export function createSlackPluginBase(params: {
       nativeCommands: true,
     },
     agentPrompt: {
-      messageToolHints: ({ cfg, accountId }) =>
-        isSlackInteractiveRepliesEnabled({ cfg, accountId })
+      messageToolHints: ({ cfg, accountId }) => {
+        const outputContract = [
+          "",
+          "### Slack — output contract",
+          "",
+          'The ONLY way your output reaches the user in Slack is `message(action="send", text="...")` or a documented send tool (interactive replies, media). Any plain response text you produce is discarded by the channel and never reaches the user.',
+          "",
+          "If you need to say something to the user, call the message tool. If you have nothing to say, stay silent — silence is a valid outcome.",
+          "",
+        ];
+        const interactiveHints = isSlackInteractiveRepliesEnabled({ cfg, accountId })
           ? [
               "- Slack interactive replies: use `[[slack_buttons: Label:value, Other:other]]` to add action buttons that route clicks back as Slack interaction system events.",
               "- Slack selects: use `[[slack_select: Placeholder | Label:value, Other:other]]` to add a static select menu that routes the chosen value back as a Slack interaction system event.",
             ]
           : [
               "- Slack interactive replies are disabled. If needed, ask to set `channels.slack.capabilities.interactiveReplies=true` (or the same under `channels.slack.accounts.<account>.capabilities`).",
-            ],
+            ];
+        return [...outputContract, ...interactiveHints];
+      },
     },
     streaming: {
       blockStreamingCoalesceDefaults: { minChars: 1500, idleMs: 1000 },
