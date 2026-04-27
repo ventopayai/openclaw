@@ -494,31 +494,122 @@ export async function dispatchPreparedSlackMessage(prepared: PreparedSlackMessag
           }
         };
 
-  const { queuedFinal, counts } = await dispatchInboundMessage({
-    ctx: prepared.ctxPayload,
-    cfg,
-    dispatcher,
-    replyOptions: {
-      ...replyOptions,
-      skillFilter: prepared.channelConfig?.skills,
-      hasRepliedRef,
-      disableBlockStreaming: useStreaming
-        ? true
-        : typeof account.config.blockStreaming === "boolean"
-          ? !account.config.blockStreaming
-          : undefined,
-      onModelSelected,
-      onPartialReply: useStreaming
-        ? undefined
-        : !previewStreamingEnabled
+  // Channel-side retry on silent turn for replyMode=tool-only.
+  //
+  // Background: when `agents.defaults.replyMode === "tool-only"`, the
+  // dispatcher's onToolResult / onBlockReply / final-replies-loop all
+  // suppress plain text. Sessions provisioned before tool-only have a
+  // long history of `assistant: <plain text>` exemplars that the model
+  // imitates, producing a silent turn that delivers nothing. We re-run
+  // dispatchInboundMessage with a corrective `[FRAMEWORK NOTE]` prefix
+  // appended to Body so the agent gets another shot at calling
+  // message(action="send"). Capped at MAX_RETRIES extra attempts.
+  //
+  // Trade-off: each retry is one extra LLM call. Triggers only on silent
+  // turns, which should converge to rare. Bounded retries prevent runaway.
+  // Note: this lives in Slack's dispatch handler instead of the runner so
+  // we only forward-port the channel-handler shape ventoclaw uses for
+  // WhatsApp Business / SMS. Long term the right home is the agent runner.
+  const replyMode = (cfg as { agents?: { defaults?: { replyMode?: string } } }).agents?.defaults
+    ?.replyMode;
+  const retryEnabled = replyMode === "tool-only";
+  const MAX_RETRIES = 2;
+  const buildCorrectivePrefix = (n: number): string =>
+    `\n\n[FRAMEWORK NOTE — retry ${n}/${MAX_RETRIES}] Your previous response did not call message(action="send"). Plain text in your assistant response is silently discarded by this channel — the user received NOTHING. Call message(action="send", text="...") now to deliver a reply, OR end the turn cleanly (no tool, no text) if you genuinely have nothing to say. Do not echo this note to the user.`;
+
+  let queuedFinal: boolean;
+  let counts: { block?: number; final?: number } & Record<string, number | undefined>;
+
+  {
+    const result = await dispatchInboundMessage({
+      ctx: prepared.ctxPayload,
+      cfg,
+      dispatcher,
+      replyOptions: {
+        ...replyOptions,
+        skillFilter: prepared.channelConfig?.skills,
+        hasRepliedRef,
+        disableBlockStreaming: useStreaming
+          ? true
+          : typeof account.config.blockStreaming === "boolean"
+            ? !account.config.blockStreaming
+            : undefined,
+        onModelSelected,
+        onPartialReply: useStreaming
           ? undefined
-          : async (payload) => {
-              updateDraftFromPartial(payload.text);
-            },
-      onAssistantMessageStart: onDraftBoundary,
-      onReasoningEnd: onDraftBoundary,
-    },
-  });
+          : !previewStreamingEnabled
+            ? undefined
+            : async (payload) => {
+                updateDraftFromPartial(payload.text);
+              },
+        onAssistantMessageStart: onDraftBoundary,
+        onReasoningEnd: onDraftBoundary,
+      },
+    });
+    queuedFinal = result.queuedFinal;
+    counts = result.counts;
+  }
+
+  let attempt = 0;
+  while (
+    retryEnabled &&
+    !(queuedFinal || (counts.block ?? 0) > 0 || (counts.final ?? 0) > 0) &&
+    attempt < MAX_RETRIES
+  ) {
+    attempt += 1;
+    logVerbose(
+      `slack: silent turn after attempt ${attempt} (replyMode=tool-only), retrying with corrective note`,
+    );
+    const baseBody = (prepared.ctxPayload as { Body?: string }).Body ?? "";
+    const correctiveBody = `${baseBody}${buildCorrectivePrefix(attempt)}`;
+    const baseSid = (prepared.ctxPayload as { MessageSid?: string }).MessageSid;
+    const correctiveCtx = {
+      ...prepared.ctxPayload,
+      Body: correctiveBody,
+      RawBody: correctiveBody,
+      CommandBody: correctiveBody,
+      ...(baseSid ? { MessageSid: `${baseSid}-retry-${attempt}` } : {}),
+    } as typeof prepared.ctxPayload;
+
+    const result = await dispatchInboundMessage({
+      ctx: correctiveCtx,
+      cfg,
+      dispatcher,
+      replyOptions: {
+        ...replyOptions,
+        skillFilter: prepared.channelConfig?.skills,
+        hasRepliedRef,
+        disableBlockStreaming: useStreaming
+          ? true
+          : typeof account.config.blockStreaming === "boolean"
+            ? !account.config.blockStreaming
+            : undefined,
+        onModelSelected,
+        // Disable streaming preview on retries — the draft stream already
+        // ran on the first attempt; double-editing it would surface the
+        // synthetic [FRAMEWORK NOTE] preview to the user.
+        onPartialReply: undefined,
+        onAssistantMessageStart: onDraftBoundary,
+        onReasoningEnd: onDraftBoundary,
+      },
+    });
+    queuedFinal = result.queuedFinal;
+    counts = result.counts;
+
+    const delivered = queuedFinal || (counts.block ?? 0) > 0 || (counts.final ?? 0) > 0;
+    if (delivered) {
+      logVerbose(`slack: retry attempt ${attempt} succeeded — agent called message tool`);
+      break;
+    }
+    if (attempt >= MAX_RETRIES) {
+      runtime.error?.(
+        danger(
+          `slack: gave up after ${MAX_RETRIES + 1} attempts — agent never called message tool; user receives nothing this turn`,
+        ),
+      );
+    }
+  }
+
   await draftStream.flush();
   draftStream.stop();
   markDispatchIdle();
