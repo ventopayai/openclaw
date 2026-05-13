@@ -93,4 +93,13 @@ export type ReplyPayload = {
   isReasoning?: boolean;
   /** Channel-specific payload data (per-channel envelope). */
   channelData?: Record<string, unknown>;
+  /** Raw assistant output split into final text and thinking. Populated on the
+   *  final block reply for plugins that need to handle thinking themselves
+   *  (e.g. when an OpenAI-compat provider returns thinking inline with the
+   *  final text). The `text` field above remains the sanitized version
+   *  delivered to channels. */
+  raw?: {
+    text: string;
+    thinking: string;
+  };
 };

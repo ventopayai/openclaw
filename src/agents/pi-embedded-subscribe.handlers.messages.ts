@@ -270,13 +270,15 @@ export function handleMessageEnd(
   promoteThinkingTagsToBlocks(assistantMessage);
 
   const rawText = extractAssistantText(assistantMessage);
+  const assistantThinking =
+    extractAssistantThinking(assistantMessage) || extractThinkingFromTaggedText(rawText);
   appendRawStream({
     ts: Date.now(),
     event: "assistant_message_end",
     runId: ctx.params.runId,
     sessionId: (ctx.params.session as { id?: string }).id,
     rawText,
-    rawThinking: extractAssistantThinking(assistantMessage),
+    rawThinking: assistantThinking,
   });
 
   const text = resolveSilentReplyFallbackText({
@@ -284,9 +286,7 @@ export function handleMessageEnd(
     messagingToolSentTexts: ctx.state.messagingToolSentTexts,
   });
   const rawThinking =
-    ctx.state.includeReasoning || ctx.state.streamReasoning
-      ? extractAssistantThinking(assistantMessage) || extractThinkingFromTaggedText(rawText)
-      : "";
+    ctx.state.includeReasoning || ctx.state.streamReasoning ? assistantThinking : "";
   const formattedReasoning = rawThinking ? formatReasoningMessage(rawThinking) : "";
   const trimmedText = text.trim();
   const parsedText = trimmedText ? parseReplyDirectives(stripTrailingDirective(trimmedText)) : null;
@@ -385,6 +385,7 @@ export function handleMessageEnd(
         replyToId,
         replyToTag,
         replyToCurrent,
+        raw: { text: rawText, thinking: assistantThinking },
       });
     }
   };
