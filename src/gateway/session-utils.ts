@@ -441,6 +441,11 @@ export function resolveSessionStoreKey(params: {
   if (!raw) {
     return raw;
   }
+  // Global scope: all keys collapse to one shared session
+  if (params.cfg.session?.scope === "global") {
+    const agentId = resolveDefaultStoreAgentId(params.cfg);
+    return `agent:${agentId}:global`;
+  }
   const rawLower = raw.toLowerCase();
   if (rawLower === "global" || rawLower === "unknown") {
     return rawLower;

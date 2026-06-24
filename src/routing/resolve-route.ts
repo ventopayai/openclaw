@@ -63,7 +63,11 @@ export { DEFAULT_ACCOUNT_ID, DEFAULT_AGENT_ID } from "./session-key.js";
 export function deriveLastRoutePolicy(params: {
   sessionKey: string;
   mainSessionKey: string;
+  sessionScope?: "per-sender" | "global";
 }): ResolvedAgentRoute["lastRoutePolicy"] {
+  if (params.sessionScope === "global") {
+    return "main";
+  }
   return params.sessionKey === params.mainSessionKey ? "main" : "session";
 }
 
@@ -625,6 +629,7 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
   const memberRoleIds = input.memberRoleIds ?? [];
   const memberRoleIdSet = new Set(memberRoleIds);
   const dmScope = input.cfg.session?.dmScope ?? "main";
+  const sessionScope = input.cfg.session?.scope ?? "per-sender";
   const identityLinks = input.cfg.session?.identityLinks;
   const shouldLogDebug = shouldLogVerbose();
   const parentPeer = input.parentPeer
@@ -660,25 +665,28 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
 
   const choose = (agentId: string, matchedBy: ResolvedAgentRoute["matchedBy"]) => {
     const resolvedAgentId = pickFirstExistingAgentId(input.cfg, agentId);
-    const sessionKey = buildAgentSessionKey({
-      agentId: resolvedAgentId,
-      channel,
-      accountId,
-      peer,
-      dmScope,
-      identityLinks,
-    }).toLowerCase();
     const mainSessionKey = buildAgentMainSessionKey({
       agentId: resolvedAgentId,
       mainKey: DEFAULT_MAIN_KEY,
     }).toLowerCase();
+    const sessionKey =
+      sessionScope === "global"
+        ? buildAgentMainSessionKey({ agentId: resolvedAgentId, mainKey: "global" }).toLowerCase()
+        : buildAgentSessionKey({
+            agentId: resolvedAgentId,
+            channel,
+            accountId,
+            peer,
+            dmScope,
+            identityLinks,
+          }).toLowerCase();
     const route = {
       agentId: resolvedAgentId,
       channel,
       accountId,
       sessionKey,
       mainSessionKey,
-      lastRoutePolicy: deriveLastRoutePolicy({ sessionKey, mainSessionKey }),
+      lastRoutePolicy: deriveLastRoutePolicy({ sessionKey, mainSessionKey, sessionScope }),
       matchedBy,
     };
     if (routeCache && routeCacheKey) {

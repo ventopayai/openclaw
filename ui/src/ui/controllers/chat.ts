@@ -71,13 +71,18 @@ export async function loadChatHistory(state: ChatState) {
   state.chatLoading = true;
   state.lastError = null;
   try {
-    const res = await state.client.request<{ messages?: Array<unknown>; thinkingLevel?: string }>(
-      "chat.history",
-      {
-        sessionKey: state.sessionKey,
-        limit: 200,
-      },
-    );
+    const res = await state.client.request<{
+      messages?: Array<unknown>;
+      thinkingLevel?: string;
+      sessionKey?: string;
+    }>("chat.history", {
+      sessionKey: state.sessionKey,
+      limit: 200,
+    });
+    // Adopt server's canonical session key (e.g. global scope redirect)
+    if (res.sessionKey && res.sessionKey !== state.sessionKey) {
+      state.sessionKey = res.sessionKey;
+    }
     const messages = Array.isArray(res.messages) ? res.messages : [];
     state.chatMessages = messages.filter((message) => !isAssistantSilentReply(message));
     state.chatThinkingLevel = res.thinkingLevel ?? null;
